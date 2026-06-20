@@ -286,6 +286,59 @@ async def get_status():
 
 
 # ==========================================
+# 钉钉审批回调路由
+# ==========================================
+
+@app.get("/api/dingtalk/callback")
+async def dingtalk_callback(task_id: str, action: str):
+    """
+    钉钉审批回调
+
+    接收钉钉卡片的审批结果，更新审批状态。
+
+    Args:
+        task_id: 任务 ID
+        action: 审批动作 ("approve" 或 "reject")
+
+    Returns:
+        dict: 响应结果
+    """
+    if action not in ("approve", "reject"):
+        raise HTTPException(status_code=400, detail="无效的审批动作")
+
+    # 更新审批状态
+    CommandInterceptor.set_approval_status(task_id, action)
+
+    print(f"[DingTalk Callback] task_id={task_id}, action={action}")
+
+    # 返回成功响应（钉钉会显示这个响应）
+    return {
+        "status": "success",
+        "message": f"操作已记录，Agent 将继续执行",
+        "task_id": task_id,
+        "action": action
+    }
+
+
+@app.get("/api/approval/{task_id}")
+async def get_approval_status(task_id: str):
+    """
+    查询审批状态
+
+    Args:
+        task_id: 任务 ID
+
+    Returns:
+        dict: 审批状态
+    """
+    status = CommandInterceptor.get_approval_status(task_id)
+    return {
+        "task_id": task_id,
+        "status": status or "not_found"
+    }
+
+
+# ==========================================
 # 启动入口
 # ==========================================
 
