@@ -5,7 +5,11 @@
       "Bash(python:*)",
       "Bash($env:PYTHONIOENCODING=\"utf-8\")",
       "Bash($env:PYTHONIOENCODING='utf-8')",
-      "Bash(query-answer.md:*)"
+      "Bash(query-answer.md:*)",
+      "Bash(git rm:*)",
+      "Bash(git rebase:*)",
+      "Bash(git add:*)",
+      "Bash(GIT_EDITOR=true git rebase --continue)"
     ]
   }
 }

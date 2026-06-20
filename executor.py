@@ -19,12 +19,12 @@ class DockerExecutor(CommandExecutor):
             self.client = docker.from_env()
             # 获取我们的靶机容器
             self.container = self.client.containers.get(container_name)
-            print(f"✅ 成功连接到沙盒靶机: {container_name}")
+            print(f"[OK] 成功连接到沙盒靶机: {container_name}")
         except docker.errors.NotFound:
-            print(f"❌ 找不到容器 {container_name}，请确保 docker-compose up -d 已运行！")
+            print(f"[Error] 找不到容器 {container_name}，请确保 docker-compose up -d 已运行！")
             raise
         except Exception as e:
-            print(f"❌ Docker 连接失败，请检查 Docker Desktop 是否启动。")
+            print(f"[Error] Docker 连接失败，请检查 Docker Desktop 是否启动。")
             raise
 
     def execute(self, command: str) -> dict:

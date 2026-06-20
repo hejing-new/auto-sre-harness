@@ -19,3 +19,5 @@ env/
 # 本地测试产生的临时文件或日志
 *.log
 mock_data/
+
+query-answer.md
