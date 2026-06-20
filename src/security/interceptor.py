@@ -172,16 +172,8 @@ class CommandInterceptor:
         cmd_parts = command.split()
         base_cmd = cmd_parts[0] if cmd_parts else ""
 
-        # 2. 检查白名单
-        if self._is_in_whitelist(command):
-            return InterceptResult(
-                allowed=True,
-                risk_level=CommandRisk.SAFE,
-                reason="命令在白名单中，安全操作",
-                original_command=command
-            )
-
-        # 3. 检查黑名单模式
+        # 2. 首先检查危险组合模式（优先级最高）
+        # 例如 curl | bash, wget | bash 等远程执行组合
         matched_dangerous = self._match_dangerous_patterns(command)
         if matched_dangerous:
             return InterceptResult(
@@ -191,13 +183,22 @@ class CommandInterceptor:
                 original_command=command
             )
 
-        # 4. 检查危险参数
+        # 3. 检查危险参数
         matched_flag = self._match_dangerous_flags(command)
         if matched_flag:
             return InterceptResult(
                 allowed=False,
                 risk_level=CommandRisk.DANGEROUS,
                 reason=f"包含危险参数: {matched_flag}",
+                original_command=command
+            )
+
+        # 4. 检查白名单（在排除危险后）
+        if self._is_in_whitelist(command):
+            return InterceptResult(
+                allowed=True,
+                risk_level=CommandRisk.SAFE,
+                reason="命令在白名单中，安全操作",
                 original_command=command
             )
 
