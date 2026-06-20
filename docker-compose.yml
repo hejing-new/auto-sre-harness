@@ -1,0 +1,8 @@
+version: '3.8'
+services:
+  target_machine:
+    image: ubuntu:22.04
+    # 保持容器一直运行，不要自动退出
+    command: tail -f /dev/null
+    container_name: auto-sre-sandbox
+    working_dir: /root

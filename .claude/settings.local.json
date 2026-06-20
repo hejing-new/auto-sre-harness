@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker-compose up:*)",
+      "Bash(python:*)",
+      "Bash($env:PYTHONIOENCODING=\"utf-8\")",
+      "Bash($env:PYTHONIOENCODING='utf-8')",
+      "Bash(query-answer.md:*)"
+    ]
+  }
+}

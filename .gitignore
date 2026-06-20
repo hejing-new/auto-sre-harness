@@ -1,0 +1,21 @@
+# 环境变量与密钥
+.env
+.env.local
+
+# Python 缓存与编译文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虚拟环境
+venv/
+env/
+.venv/
+
+# IDE 配置文件
+.idea/
+.vscode/
+
+# 本地测试产生的临时文件或日志
+*.log
+mock_data/
