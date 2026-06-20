@@ -4,9 +4,13 @@
 功能：
 - 发送钉钉 ActionCard（交互式卡片）
 - 支持审批按钮回调
+
+配置：
+- Dingding_Secret: 钉钉机器人签名密钥（从 .env 文件加载）
 """
 
 import json
+import os
 import requests
 import hashlib
 import hmac
@@ -14,6 +18,17 @@ import base64
 import time
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
+from pathlib import Path
+
+# 尝试加载 .env 文件
+try:
+    from dotenv import load_dotenv
+    # 尝试从项目根目录加载 .env
+    env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+    if env_path.exists():
+        load_dotenv(env_path)
+except ImportError:
+    pass  # dotenv 未安装时忽略
 
 
 @dataclass
@@ -220,11 +235,23 @@ def init_dingtalk_bot(webhook_url: str, secret: Optional[str] = None):
 
     Args:
         webhook_url: 钉钉 Webhook URL
-        secret: 可选的签名密钥
+        secret: 可选的签名密钥（如果未提供，从环境变量 Dingding_Secret 加载）
     """
     global _dingtalk_bot
+
+    # 如果未提供 secret，从环境变量加载
+    if secret is None:
+        secret = os.getenv("Dingding_Secret")
+        if secret:
+            print("[DingTalk] 从环境变量加载 Dingding_Secret")
+        else:
+            print("[DingTalk] 未配置签名密钥（Dingding_Secret），将不生成签名")
+
     _dingtalk_bot = DingTalkBot(webhook_url, secret)
-    print("[DingTalk] 全局实例初始化完成")
+
+    print(f"[DingTalk] 全局实例初始化完成")
+    print(f"   - Webhook: {webhook_url[:50]}...")
+    print(f"   - 签名: {'已配置' if secret else '未配置'}")
 
 
 def get_dingtalk_bot() -> Optional[DingTalkBot]:

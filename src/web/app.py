@@ -11,6 +11,7 @@ Auto-SRE Web 管理界面 - FastAPI 后端
 """
 
 import sys
+import os
 import json
 import asyncio
 from pathlib import Path
@@ -39,6 +40,34 @@ from security.interceptor import CommandInterceptor
 from core.memory import ContextManager
 from agent.engine import AgentEngine
 from agent.subagents import LogAnalyzerAgent
+
+# ==========================================
+# 加载 .env 文件
+# ==========================================
+try:
+    from dotenv import load_dotenv
+    env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+    if env_path.exists():
+        load_dotenv(env_path)
+        print("[App] 已加载 .env 文件")
+except ImportError:
+    pass
+
+# ==========================================
+# 初始化钉钉机器人（如果配置了 Webhook）
+# ==========================================
+try:
+    from utils.dingtalk_bot import init_dingtalk_bot
+    dingtalk_webhook = os.getenv("DINGTALK_WEBHOOK_URL")
+    if dingtalk_webhook:
+        init_dingtalk_bot(dingtalk_webhook)
+        print("[App] 钉钉机器人已启用")
+    else:
+        print("[App] 未配置 DINGTALK_WEBHOOK_URL，钉钉审批功能未启用")
+except ImportError:
+    print("[App] dingtalk_bot 模块未安装，钉钉审批功能未启用")
+except Exception as e:
+    print(f"[App] 钉钉机器人初始化失败: {e}")
 
 # ==========================================
 # 全局变量

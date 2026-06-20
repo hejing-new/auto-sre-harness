@@ -12,7 +12,10 @@ Auto-SRE Web 管理界面 - 启动脚本
 import sys
 import os
 from pathlib import Path
+from dotenv import load_dotenv
 
+# 加载 .env 文件
+load_dotenv()
 # 修复 Windows 编码
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 sys.stderr.reconfigure(encoding='utf-8', errors='replace')
@@ -35,6 +38,25 @@ if missing_vars:
     print('  $env:LLM_API_KEY="your-api-key"')
     print("="*60)
     print()
+
+# 检查钉钉配置（可选）
+dingtalk_webhook = os.getenv("DINGTALK_WEBHOOK_URL")
+dingtalk_secret = os.getenv("Dingding_Secret")
+
+print("[DingTalk] 配置状态:")
+print(f"   - Webhook: {'已配置' if dingtalk_webhook else '未配置'}")
+print(f"   - Secret: {'已配置' if dingtalk_secret else '未配置'}")
+
+if dingtalk_webhook and not dingtalk_secret:
+    print("\n[提示] 已配置 DINGTALK_WEBHOOK_URL 但未配置 Dingding_Secret")
+    print("      钉钉消息将不生成签名，可能存在安全风险")
+    print("      建议在 .env 文件中添加: Dingding_Secret=your-secret")
+elif dingtalk_webhook and dingtalk_secret:
+    print("   - 状态: 钉钉审批功能已启用")
+else:
+    print("   - 状态: 钉钉审批功能未启用")
+
+print()
 
 # 启动 FastAPI 服务
 if __name__ == "__main__":
