@@ -3,8 +3,8 @@ Auto-SRE Web 管理界面 - FastAPI 后端
 
 功能：
 1. 提供静态 HTML 页面渲染
-2. 异步 API 路由触发 Agent 诊断
-3. SSE 实时推送 Agent 日志
+2. SSE 流式诊断端点（实时推送 Agent 日志）
+3. 钉钉审批回调
 
 启动命令：
     uvicorn src.web.app:app --reload --host 0.0.0.0 --port 8000
@@ -15,7 +15,7 @@ import os
 import json
 import asyncio
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 from datetime import datetime
 
 # 修复 Windows 编码
@@ -27,17 +27,18 @@ project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "src"))
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import Optional
 
 # 导入核心组件
 from executor import DockerExecutor
 from utils.llm_client import LLMClient
 from security.interceptor import CommandInterceptor
 from core.memory import ContextManager
+from core.log_broadcaster import LogBroadcaster, get_broadcaster, LogLevel
+from web.history_store import history_store
 from agent.engine import AgentEngine
 from agent.subagents import LogAnalyzerAgent
 
@@ -79,10 +80,7 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# 日志队列（用于 SSE 推送）
-log_queue: asyncio.Queue = asyncio.Queue()
-
-# Agent 运行状态
+# Agent 运行状态（保留用于 /api/status）
 agent_running = False
 agent_result: Optional[dict] = None
 
@@ -107,33 +105,14 @@ class LogEntry(BaseModel):
 
 
 # ==========================================
-# 自定义日志处理器
-# ==========================================
-
-class QueueHandler:
-    """将日志推送到 asyncio 队列的处理器"""
-
-    def __init__(self, queue: asyncio.Queue):
-        self.queue = queue
-
-    async def log(self, level: str, message: str, details: dict = None):
-        """发送日志到队列"""
-        entry = LogEntry(
-            timestamp=datetime.now().strftime("%H:%M:%S.%f")[:-3],
-            level=level,
-            message=message,
-            details=details
-        )
-        await self.queue.put(entry.dict())
-
-
-# ==========================================
 # 页面路由
 # ==========================================
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    """返回主页面 HTML"""
+    dist_path = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist" / "index.html"
+    if dist_path.exists():
+        return dist_path.read_text(encoding="utf-8")
     html_path = Path(__file__).parent / "templates" / "index.html"
     return html_path.read_text(encoding="utf-8")
 
@@ -142,157 +121,77 @@ async def index():
 # API 路由
 # ==========================================
 
-@app.post("/api/trigger-agent")
-async def trigger_agent(request: AlertRequest):
+@app.get("/api/stream-diagnose")
+async def stream_diagnose(
+    alert: str = Query(..., description="告警信息", min_length=1),
+    container: str = Query("auto-sre-sandbox", description="容器名称"),
+    max_iterations: int = Query(10, description="最大迭代次数", ge=1, le=50)
+):
     """
-    触发 Agent 诊断
+    SSE 流式诊断端点
 
-    异步启动 AgentEngine，开始诊断流程。
-    日志通过 SSE 实时推送到前端。
+    实时推送 Agent 诊断过程的全部日志（思考、执行、拦截、结果）。
+    前端通过 EventSource 连接此端点即可获得实时流式输出。
+
+    参数:
+        alert: 告警信息（必填）
+        container: 容器名称（默认 auto-sre-sandbox）
+        max_iterations: 最大迭代次数（默认 10，最大 50）
+
+    SSE 事件格式:
+        - {"type": "log", "timestamp": ..., "level": ..., "message": ...}
+        - {"type": "done", "timestamp": ..., "level": "DONE", "details": {"result": ...}}
+        - {"type": "error", "timestamp": ..., "message": ...}
     """
-    global agent_running, agent_result
+    # 重置日志广播器（新会话）
+    LogBroadcaster.reset_instance()
+    broadcaster = await get_broadcaster()
 
-    if agent_running:
-        raise HTTPException(status_code=409, detail="Agent 正在运行中，请等待完成")
-
-    # 重置状态
-    agent_running = True
-    agent_result = None
-    log_queue = asyncio.Queue()
-
-    # 启动异步任务
-    asyncio.create_task(run_agent_task(request, log_queue))
-
-    return {
-        "status": "started",
-        "message": "Agent 诊断已启动",
-        "alert": request.alert
-    }
-
-
-async def run_agent_task(request: AlertRequest, queue: asyncio.Queue):
-    """异步运行 Agent 任务"""
-    global agent_running, agent_result
-
-    handler = QueueHandler(queue)
-
-    try:
-        # 步骤 1: 初始化组件
-        await handler.log("INFO", "初始化 Agent 组件...")
-
-        # Docker 执行器
-        await handler.log("INFO", "连接 Docker 容器...")
-        executor = DockerExecutor(container_name=request.container)
-        await handler.log("SUCCESS", f"已连接到容器: {request.container}")
-
-        # LLM 客户端
-        await handler.log("INFO", "初始化 LLM 客户端...")
-        llm = LLMClient()
-        await handler.log("SUCCESS", f"LLM 模型: {llm.model}")
-
-        # 拦截器
-        await handler.log("INFO", "初始化命令拦截器...")
-        interceptor = CommandInterceptor(strict_mode=True)
-
-        # 上下文管理器
-        await handler.log("INFO", "初始化上下文管理器...")
-        context_manager = ContextManager(max_turns=20, tail_turns=5)
-
-        # 日志分析器
-        await handler.log("INFO", "初始化日志分析子智能体...")
-        log_analyzer = LogAnalyzerAgent(executor=executor)
-
-        # 步骤 2: 创建 Agent 引擎
-        await handler.log("INFO", "创建 Agent 引擎...")
-        engine = AgentEngine(
-            executor=executor,
-            llm_client=llm,
-            interceptor=interceptor,
-            context_manager=context_manager,
-            log_analyzer=log_analyzer,
-            max_iterations=request.max_iterations
-        )
-
-        # 步骤 3: 运行 Agent Loop
-        await handler.log("REASONING", f"开始诊断: {request.alert}")
-
-        # 自定义步骤处理器，用于推送日志
-        original_handler = engine.on_step
-
-        def custom_step_handler(step):
-            # 推送步骤日志
-            if step.llm_response:
-                asyncio.create_task(
-                    handler.log("REASONING", f"LLM 思考: {step.llm_response.thinking}")
-                )
-            if step.command:
-                asyncio.create_task(
-                    handler.log("EXECUTING", f"执行命令: {step.command}")
-                )
-            if step.intercept_result:
-                status = "PASS" if step.intercept_result.allowed else "BLOCKED"
-                asyncio.create_task(
-                    handler.log("INTERCEPTING", f"拦截检查: {status} - {step.intercept_result.reason}")
-                )
-            if step.execute_result:
-                exit_code = step.execute_result.get("exit_code", -1)
-                stdout_preview = step.execute_result.get("stdout", "")[:100]
-                asyncio.create_task(
-                    handler.log("INFO", f"执行结果 (exit_code={exit_code}): {stdout_preview}")
-                )
-
-        engine.on_step = custom_step_handler
-
-        # 运行引擎
-        result = engine.run(request.alert)
-
-        # 步骤 4: 输出结果
-        if result.success:
-            await handler.log("SUCCESS", "诊断完成！")
-            await handler.log("SUCCESS", f"RCA 报告: {result.final_analysis[:200]}...")
-        else:
-            await handler.log("ERROR", "诊断失败或未完成")
-
-        # 保存结果
-        agent_result = {
-            "success": result.success,
-            "total_steps": result.total_steps,
-            "commands_executed": result.commands_executed,
-            "commands_blocked": result.commands_blocked,
-            "final_analysis": result.final_analysis,
-            "compression_stats": result.compression_stats
-        }
-
-        # 发送完成信号
-        await handler.log("DONE", "诊断流程结束", {"result": agent_result})
-
-    except Exception as e:
-        await handler.log("ERROR", f"Agent 运行异常: {str(e)}")
-        agent_result = {"success": False, "error": str(e)}
-
-    finally:
-        agent_running = False
-
-
-@app.get("/api/logs")
-async def stream_logs():
-    """
-    SSE 日志流
-
-    实时推送 Agent 执行过程中的日志到前端。
-    """
     async def event_generator() -> AsyncGenerator[str, None]:
-        while True:
-            try:
-                # 等待日志，超时则发送心跳
-                log_entry = await asyncio.wait_for(log_queue.get(), timeout=1.0)
-                yield f"data: {json.dumps(log_entry, ensure_ascii=False)}\n\n"
-            except asyncio.TimeoutError:
-                # 发送心跳保持连接
-                yield f"data: {json.dumps({'type': 'heartbeat', 'timestamp': datetime.now().isoformat()}, ensure_ascii=False)}\n\n"
-            except Exception as e:
-                yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
-                break
+        # 订阅日志广播器
+        queue = await broadcaster.subscribe()
+
+        try:
+            # 在后台运行 Agent
+            asyncio.create_task(
+                _run_agent_and_log(alert, container, max_iterations)
+            )
+
+            # 持续消费日志队列
+            while True:
+                try:
+                    entry = await asyncio.wait_for(queue.get(), timeout=120.0)
+
+                    # None 表示流结束（理论上不会到这里，由 DONE 事件处理）
+                    if entry is None:
+                        break
+
+                    # 序列化为 SSE 格式
+                    yield f"data: {json.dumps(entry, ensure_ascii=False)}\n\n"
+
+                    # 如果收到 DONE 事件，结束流
+                    if entry.get("type") == "done":
+                        break
+
+                except asyncio.TimeoutError:
+                    # 发送心跳保持连接（前端可忽略）
+                    yield f"data: {json.dumps({'type': 'heartbeat', 'timestamp': datetime.now().isoformat()}, ensure_ascii=False)}\n\n"
+
+        except asyncio.CancelledError:
+            # 客户端断开连接（正常行为，不记录错误）
+            pass
+        except Exception as e:
+            # 其他异常，发送错误信息给前端
+            error_entry = {
+                "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
+                "level": "ERROR",
+                "message": f"流式传输异常: {str(e)}",
+                "type": "error"
+            }
+            yield f"data: {json.dumps(error_entry, ensure_ascii=False)}\n\n"
+        finally:
+            # 确保取消订阅
+            await broadcaster.unsubscribe(queue)
 
     return StreamingResponse(
         event_generator(),
@@ -305,13 +204,195 @@ async def stream_logs():
     )
 
 
+async def _run_agent_and_log(alert: str, container: str, max_iterations: int):
+    """
+    运行 AgentEngine 并通过 LogBroadcaster 推送日志。
+
+    此函数作为后台任务运行，负责：
+    1. 初始化 Agent 组件
+    2. 注册回调以捕获每一步的日志
+    3. 运行 Agent Loop
+    4. 通过 broadcaster.complete() 发送完成信号
+    """
+    broadcaster = await get_broadcaster()
+
+    try:
+        # === 步骤 1: 初始化组件 ===
+        await broadcaster.log_info("初始化 Agent 组件...")
+
+        await broadcaster.log_info("连接 Docker 容器...")
+        executor = DockerExecutor(container_name=container)
+        await broadcaster.log_success(f"已连接到容器: {container}")
+
+        await broadcaster.log_info("初始化 LLM 客户端...")
+        llm = LLMClient()
+        await broadcaster.log_success(f"LLM 模型: {llm.model}")
+
+        await broadcaster.log_info("初始化命令拦截器...")
+        interceptor = CommandInterceptor(strict_mode=True)
+
+        await broadcaster.log_info("初始化上下文管理器...")
+        context_manager = ContextManager(max_turns=20, tail_turns=5)
+
+        await broadcaster.log_info("初始化日志分析子智能体...")
+        log_analyzer = LogAnalyzerAgent(executor=executor)
+
+        # === 步骤 2: 创建 Agent 引擎 ===
+        await broadcaster.log_info("创建 Agent 引擎...")
+
+        # 定义回调函数，将每一步的日志推送到广播器
+        def on_step_callback(step):
+            """Agent 每步执行的回调（在线程中运行，使用同步方法）"""
+            # 使用同步方法，避免阻塞主事件循环
+            if step.llm_response:
+                if isinstance(step.llm_response, dict):
+                    thinking = step.llm_response.get("content", "")
+                else:
+                    thinking = getattr(step.llm_response, "thinking", "")
+                if thinking:
+                    broadcaster.log_reasoning_sync(f"LLM 思考: {thinking}")
+
+            if step.command:
+                broadcaster.log_executing_sync(f"执行命令: {step.command}")
+
+            if step.intercept_result:
+                status = "PASS" if step.intercept_result.allowed else "BLOCKED"
+                broadcaster.log_intercepting_sync(
+                    f"拦截检查: {status} - {step.intercept_result.reason}"
+                )
+
+            if step.execute_result:
+                exit_code = step.execute_result.get("exit_code", -1)
+                stdout_preview = step.execute_result.get("stdout", "")[:100]
+                broadcaster.log_info_sync(
+                    f"执行结果 (exit_code={exit_code}): {stdout_preview}"
+                )
+
+        engine = AgentEngine(
+            executor=executor,
+            llm_client=llm,
+            interceptor=interceptor,
+            context_manager=context_manager,
+            log_analyzer=log_analyzer,
+            max_iterations=max_iterations,
+            on_step=on_step_callback
+        )
+
+        # === 步骤 3: 运行 Agent Loop ===
+        await broadcaster.log_reasoning(f"开始诊断: {alert}")
+
+        # AgentEngine.run() 是同步方法，在异步线程中运行
+        # 使用 loop.run_in_executor 而不是 asyncio.to_thread，以便主事件循环可以继续处理其他任务
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, engine.run, alert)
+
+        # === 步骤 4: 输出结果 ===
+        if result.success:
+            await broadcaster.log_success("诊断完成！")
+            await broadcaster.log_success(f"RCA 报告: {result.final_analysis[:200]}...")
+        else:
+            await broadcaster.log_error("诊断失败或未完成")
+
+        # 构建最终结果
+        final_result = {
+            "success": result.success,
+            "total_steps": result.total_steps,
+            "commands_executed": result.commands_executed,
+            "commands_blocked": result.commands_blocked,
+            "final_analysis": result.final_analysis,
+            "compression_stats": result.compression_stats
+        }
+
+        # 保存到历史记录
+        try:
+            history_store.add_record({
+                "alert": alert,
+                "container": container,
+                "success": result.success,
+                "total_steps": result.total_steps,
+                "commands_executed": result.commands_executed,
+                "commands_blocked": result.commands_blocked,
+                "final_analysis": result.final_analysis,
+                "compression_stats": result.compression_stats,
+            })
+            await broadcaster.log_info("[History] 诊断记录已保存")
+        except Exception as e:
+            await broadcaster.log_error(f"[History] 保存失败: {str(e)}")
+
+        # 发送完成信号
+        await broadcaster.complete(final_result)
+
+    except Exception as e:
+        await broadcaster.log_error(f"Agent 运行异常: {str(e)}")
+        # 保存失败记录
+        try:
+            history_store.add_record({
+                "alert": alert,
+                "container": container,
+                "success": False,
+                "error": str(e),
+                "final_analysis": "",
+            })
+        except:
+            pass
+        await broadcaster.complete({
+            "success": False,
+            "error": str(e)
+        })
+
+
 @app.get("/api/status")
 async def get_status():
     """获取 Agent 运行状态"""
+    broadcaster = await get_broadcaster()
     return {
-        "running": agent_running,
-        "result": agent_result
+        "completed": broadcaster.is_completed,
+        "result": broadcaster.get_result()
     }
+
+# ==========================================
+# 历史记录 API 路由
+# ==========================================
+
+@app.get("/api/history")
+async def get_history(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
+    """
+    获取诊断历史列表
+
+    Args:
+        limit: 返回数量（默认50，最大200）
+        offset: 偏移量（用于分页）
+
+    Returns:
+        list: 历史记录列表
+    """
+    records = history_store.get_list(limit=limit, offset=offset)
+    total = history_store.count()
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "records": records
+    }
+
+
+@app.get("/api/history/{task_id}")
+async def get_history_detail(task_id: str):
+    """
+    获取单次诊断的完整 RCA 报告详情
+
+    Args:
+        task_id: 诊断任务ID
+
+    Returns:
+        dict: 诊断详情，包括完整 RCA 报告
+    """
+    record = history_store.get_detail(task_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"未找到任务: {task_id}")
+    return record
+
+
 
 
 # ==========================================
@@ -370,6 +451,14 @@ async def get_approval_status(task_id: str):
 # ==========================================
 # 启动入口
 # ==========================================
+
+
+# ==========================================
+# Mount static files for frontend (production)
+# ==========================================
+_frontend_dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+if _frontend_dist.exists():
+    app.mount("/assets", StaticFiles(directory=str(_frontend_dist / "assets")), name="frontend-assets")
 
 if __name__ == "__main__":
     import uvicorn

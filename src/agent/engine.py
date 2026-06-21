@@ -222,7 +222,7 @@ class AgentEngine:
             step = LoopStep(
                 step_number=self.iteration_count,
                 state=LoopState.REASONING,
-                llm_response=llm_response if not self.is_real_llm else None
+                llm_response=llm_response  # Always pass LLM response for callback
             )
 
             # 通知回调
@@ -310,6 +310,9 @@ class AgentEngine:
         intercept_result = self._intercept_command(llm_response.command)
         step.intercept_result = intercept_result
 
+        # 通知回调（拦截后）
+        self.on_step(step)
+
         if not intercept_result.allowed:
             print(f"\n[Blocked] 命令被拦截: {intercept_result.reason}")
             step.state = LoopState.BLOCKED
@@ -319,6 +322,9 @@ class AgentEngine:
         self._set_state(LoopState.EXECUTING)
         execute_result = self._execute_command(llm_response.command)
         step.execute_result = execute_result
+
+        # 通知回调（执行后）
+        self.on_step(step)
 
         # 收集结果
         self._set_state(LoopState.COLLECTING)
@@ -363,6 +369,9 @@ class AgentEngine:
                 intercept_result = self._intercept_command(command)
                 step.intercept_result = intercept_result
 
+                # 通知回调（拦截后）
+                self.on_step(step)
+
                 if not intercept_result.allowed:
                     print(f"\n[Blocked] 命令被拦截: {intercept_result.reason}")
                     step.state = LoopState.BLOCKED
@@ -379,6 +388,9 @@ class AgentEngine:
                 self._set_state(LoopState.EXECUTING)
                 execute_result = self._execute_command(command)
                 step.execute_result = execute_result
+
+                # 通知回调（执行后）
+                self.on_step(step)
 
                 # 将执行结果反馈给 LLM
                 result_str = json.dumps({

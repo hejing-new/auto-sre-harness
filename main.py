@@ -4,19 +4,19 @@ Auto-SRE Harness - 主入口
 
 这是 Auto-SRE 守护进程的主入口文件，负责：
 1. 解析命令行参数
-2. 初始化所有组件（执行器、LLM、拦截器）
+2. 初始化所有组件（执行器、LLM、拦截器、上下文管理器）
 3. 启动 Agent Loop
 4. 输出结果
 
 使用方式:
-    # Mock 模式（测试）
-    python main.py --mode mock
-
-    # 真实 LLM 模式
-    python main.py --mode llm --alert "CPU 使用率 95%"
+    # 默认使用真实 LLM
+    python main.py --alert "CPU 使用率 95%"
 
     # 自定义告警
     python main.py --alert "Nginx 返回 502 错误"
+
+    # 自定义容器名称
+    python main.py --container my-sandbox --alert "内存使用率 90%"
 """
 
 import sys
@@ -24,28 +24,25 @@ import os
 import argparse
 from pathlib import Path
 
+# 修复 Windows 终端 GBK 编码问题
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 # 添加 src 目录到 Python 路径
 src_path = Path(__file__).resolve().parent / "src"
 sys.path.insert(0, str(src_path))
 
 from executor import DockerExecutor
-from utils.mock_llm import MockLLMClient
 from utils.llm_client import LLMClient, SRE_SYSTEM_PROMPT, AVAILABLE_TOOLS
 from security.interceptor import CommandInterceptor
 from agent.engine import AgentEngine
+from core.memory import ContextManager
 
 
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(
         description="Auto-SRE Harness - 自动化 SRE 诊断系统"
-    )
-
-    parser.add_argument(
-        "--mode",
-        choices=["mock", "llm"],
-        default="mock",
-        help="运行模式: mock (测试) 或 llm (真实 LLM)"
     )
 
     parser.add_argument(
@@ -76,6 +73,13 @@ def parse_args():
         help="启用严格模式（拦截未知命令）"
     )
 
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="LLM 模型名称（默认从环境变量 LLM_MODEL 读取）"
+    )
+
     return parser.parse_args()
 
 
@@ -84,12 +88,12 @@ def init_components(args):
     初始化所有组件
 
     Returns:
-        tuple: (executor, llm, interceptor)
+        tuple: (executor, llm, interceptor, context_manager)
     """
     print("[Main] 初始化组件...")
 
     # 1. 创建 Docker 执行器
-    print("\n[1/3] 创建 Docker 执行器...")
+    print("\n[1/4] 创建 Docker 执行器...")
     try:
         executor = DockerExecutor(container_name=args.container)
     except Exception as e:
@@ -97,27 +101,29 @@ def init_components(args):
         print("[Tip] 请确保已运行: docker-compose up -d")
         sys.exit(1)
 
-    # 2. 创建 LLM 客户端
-    print("\n[2/3] 创建 LLM 客户端...")
-    if args.mode == "llm":
-        try:
-            llm = LLMClient()
-        except ValueError as e:
-            print(f"[Error] LLM 初始化失败: {e}")
-            print("[Tip] 请设置环境变量:")
-            print("  $env:LLM_API_KEY='your-api-key'")
-            print("  $env:LLM_MODEL='gpt-4'")
-            print("  $env:LLM_BASE_URL='https://api.openai.com/v1'")
-            sys.exit(1)
-    else:
-        llm = MockLLMClient(scenario="cpu_high")
-        print("[Mode] 使用 Mock LLM 模式（测试用）")
+    # 2. 创建真实 LLM 客户端
+    print("\n[2/4] 创建真实 LLM 客户端...")
+    try:
+        llm = LLMClient(model=args.model)
+        print(f"[OK] 正在使用真实的 LLM 引擎: {llm.model}")
+        print(f"     Base URL: {llm.base_url or 'https://api.openai.com/v1'}")
+    except ValueError as e:
+        print(f"[Error] LLM 初始化失败: {e}")
+        print("[Tip] 请设置环境变量:")
+        print("  $env:LLM_API_KEY='your-api-key'")
+        print("  $env:LLM_MODEL='gpt-4'")
+        print("  $env:LLM_BASE_URL='https://api.openai.com/v1'")
+        sys.exit(1)
 
     # 3. 创建命令拦截器
-    print("\n[3/3] 创建命令拦截器...")
+    print("\n[3/4] 创建命令拦截器...")
     interceptor = CommandInterceptor(strict_mode=args.strict)
 
-    return executor, llm, interceptor
+    # 4. 创建上下文管理器
+    print("\n[4/4] 创建上下文管理器...")
+    context_manager = ContextManager(max_turns=20, tail_turns=5)
+
+    return executor, llm, interceptor, context_manager
 
 
 def main():
@@ -128,13 +134,13 @@ def main():
 
     # 解析参数
     args = parse_args()
-    print(f"\n[Config] 运行模式: {args.mode}")
+    print(f"\n[Config] 运行模式: 真实 LLM 引擎")
     print(f"[Config] 最大迭代次数: {args.max_iterations}")
     print(f"[Config] 严格模式: {'启用' if args.strict else '禁用'}")
     print(f"[Config] 告警信息: {args.alert}")
 
     # 初始化组件
-    executor, llm, interceptor = init_components(args)
+    executor, llm, interceptor, context_manager = init_components(args)
 
     # 创建 Agent 引擎
     print("\n[Main] 创建 Agent 引擎...")
@@ -142,6 +148,7 @@ def main():
         executor=executor,
         llm_client=llm,
         interceptor=interceptor,
+        context_manager=context_manager,
         max_iterations=args.max_iterations
     )
 
@@ -157,6 +164,12 @@ def main():
     print(f"总步骤: {result.total_steps}")
     print(f"执行命令: {result.commands_executed}")
     print(f"拦截命令: {result.commands_blocked}")
+
+    if result.compression_stats:
+        print(f"\n[压缩统计]")
+        print(f"  L1 应用次数: {result.compression_stats['l1_applied']}")
+        print(f"  L2 应用次数: {result.compression_stats['l2_applied']}")
+        print(f"  节省字符数: {result.compression_stats['chars_saved']}")
 
     if result.final_analysis:
         print(f"\n[RCA Report]")

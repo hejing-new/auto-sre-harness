@@ -25,6 +25,14 @@ project_root = Path(__file__).resolve().parent
 sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "src"))
 
+# 设置 PYTHONPATH 环境变量，确保 uvicorn reload 子进程也能找到模块
+# 当 reload=True 时，uvicorn 使用 spawn 模式创建子进程，子进程不继承父进程的 sys.path
+os.environ["PYTHONPATH"] = os.pathsep.join([
+    str(project_root),
+    str(project_root / "src"),
+    os.environ.get("PYTHONPATH", "")
+])
+
 # 检查环境变量
 required_env_vars = ["LLM_API_KEY"]
 missing_vars = [var for var in required_env_vars if not os.getenv(var)]
@@ -77,6 +85,6 @@ if __name__ == "__main__":
         "src.web.app:app",
         host="0.0.0.0",
         port=8000,
-        reload=True,
+        reload=False,
         log_level="info"
     )

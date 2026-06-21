@@ -1,5 +1,5 @@
 """
-Mock 测试：Agent Loop 引擎 (AgentEngine)
+Mock 测试：Agent Loop 引擎 (AgentEngine) + LogBroadcaster
 
 运行命令：
     pytest tests/test_agent_engine.py -v
@@ -9,10 +9,12 @@ Mock 测试：Agent Loop 引擎 (AgentEngine)
     - 安全拦截器集成
     - 循环控制逻辑
     - 错误处理
+    - LogBroadcaster 日志广播器
 """
 
 import sys
 import json
+import asyncio
 from pathlib import Path
 from unittest.mock import Mock, MagicMock, patch
 
@@ -23,6 +25,7 @@ import pytest
 from agent.engine import AgentEngine, LoopState, LoopResult
 from utils.mock_llm import MockLLMClient, ResponseType
 from security.interceptor import CommandInterceptor, CommandRisk
+from core.log_broadcaster import LogBroadcaster, get_broadcaster, LogLevel
 
 
 class TestAgentEngineWithMockLLM:
@@ -483,6 +486,109 @@ class TestAgentEngineIntegration:
         # 验证有命令被拦截
         blocked_steps = [s for s in engine.steps if s.intercept_result and not s.intercept_result.allowed]
         assert len(blocked_steps) > 0
+
+
+class TestLogBroadcaster:
+    """日志广播器单元测试"""
+
+    def setup_method(self):
+        """每个测试前重置广播器"""
+        LogBroadcaster.reset_instance()
+
+    @pytest.mark.asyncio
+    async def test_subscribe_and_log(self):
+        """测试订阅和日志推送"""
+        broadcaster = await get_broadcaster()
+        queue = await broadcaster.subscribe()
+
+        await broadcaster.log_info("测试消息")
+        entry = await asyncio.wait_for(queue.get(), timeout=1.0)
+
+        assert entry["level"] == "INFO"
+        assert entry["message"] == "测试消息"
+        assert entry["type"] == "log"
+
+    @pytest.mark.asyncio
+    async def test_multiple_subscribers(self):
+        """测试多订阅者同时接收"""
+        broadcaster = await get_broadcaster()
+        q1 = await broadcaster.subscribe()
+        q2 = await broadcaster.subscribe()
+
+        await broadcaster.log_error("错误消息")
+
+        e1 = await asyncio.wait_for(q1.get(), timeout=1.0)
+        e2 = await asyncio.wait_for(q2.get(), timeout=1.0)
+
+        assert e1["message"] == "错误消息"
+        assert e2["message"] == "错误消息"
+
+    @pytest.mark.asyncio
+    async def test_complete_signal(self):
+        """测试完成信号发送"""
+        broadcaster = await get_broadcaster()
+        queue = await broadcaster.subscribe()
+
+        result = {"success": True, "steps": 5}
+        await broadcaster.complete(result)
+
+        entry = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert entry["type"] == "done"
+        assert entry["details"]["result"]["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_unsubscribe_stops_receiving(self):
+        """测试取消订阅后不再接收消息"""
+        broadcaster = await get_broadcaster()
+        queue = await broadcaster.subscribe()
+        await broadcaster.unsubscribe(queue)
+
+        await broadcaster.log_info("不应收到")
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(queue.get(), timeout=0.5)
+
+    @pytest.mark.asyncio
+    async def test_all_log_levels(self):
+        """测试所有日志级别"""
+        broadcaster = await get_broadcaster()
+        queue = await broadcaster.subscribe()
+
+        await broadcaster.log_reasoning("推理中")
+        await broadcaster.log_executing("执行中")
+        await broadcaster.log_intercepting("拦截中")
+        await broadcaster.log_blocked("已拦截")
+        await broadcaster.log_success("成功")
+
+        levels = []
+        for _ in range(5):
+            entry = await asyncio.wait_for(queue.get(), timeout=1.0)
+            levels.append(entry["level"])
+
+        assert "REASONING" in levels
+        assert "EXECUTING" in levels
+        assert "INTERCEPTING" in levels
+        assert "BLOCKED" in levels
+        assert "SUCCESS" in levels
+
+    @pytest.mark.asyncio
+    async def test_is_completed_property(self):
+        """测试 is_completed 属性"""
+        broadcaster = await get_broadcaster()
+        assert broadcaster.is_completed is False
+
+        await broadcaster.complete({"success": True})
+        assert broadcaster.is_completed is True
+
+    @pytest.mark.asyncio
+    async def test_get_result(self):
+        """测试 get_result 方法"""
+        broadcaster = await get_broadcaster()
+        assert broadcaster.get_result() is None
+
+        result = {"success": True, "data": "test"}
+        await broadcaster.complete(result)
+        assert broadcaster.get_result() == result
 
 
 # ==========================================

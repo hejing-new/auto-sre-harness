@@ -24,7 +24,7 @@ from openai import OpenAI, APIError, APIConnectionError, RateLimitError, APITime
 load_dotenv()
 
 # 导入拦截器类型用于类型提示
-from ..security.interceptor import CommandInterceptor
+from src.security.interceptor import CommandInterceptor
 
 
 # ==========================================
