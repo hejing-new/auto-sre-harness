@@ -15,6 +15,7 @@ import requests
 import hashlib
 import hmac
 import base64
+import urllib.parse
 import time
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
@@ -179,13 +180,27 @@ class DingTalkBot:
 
         return self._send_request(payload)
 
+    def _build_signed_url(self) -> str:
+        """
+        构建带签名的 Webhook URL
+
+        Returns:
+            str: 拼接 timestamp 和 sign 后的完整 URL
+        """
+        if not self.secret:
+            return self.webhook_url
+
+        timestamp = str(round(time.time() * 1000))
+        sign = self._generate_sign(timestamp)
+        return f"{self.webhook_url}&timestamp={timestamp}&sign={sign}"
+
     def _send_request(
         self,
         payload: Dict[str, Any],
         task_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        发送请求到钉钉 Webhook
+        发送请求到钉钉 Webhook（签名拼接到 URL）
 
         Args:
             payload: 请求体
@@ -194,18 +209,14 @@ class DingTalkBot:
         Returns:
             Dict: 钉钉 API 响应
         """
-        # 添加签名（如果配置了密钥）
-        if self.secret:
-            timestamp = str(round(time.time() * 1000))
-            sign = self._generate_sign(timestamp)
-            payload["timestamp"] = timestamp
-            payload["sign"] = sign
+        # 构建带签名的 URL
+        url = self._build_signed_url()
 
         try:
             print(f"[DingTalk] 发送消息: {task_id or 'text'}")
 
             response = requests.post(
-                self.webhook_url,
+                url,
                 json=payload,
                 headers={"Content-Type": "application/json"},
                 timeout=10
